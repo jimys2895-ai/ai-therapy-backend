@@ -445,7 +445,8 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
 
         # Connect to OpenAI Realtime API
         headers = {
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+            "OpenAI-Beta": "realtime=v1"
         }
 
         openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers)
@@ -469,7 +470,6 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {"model": "whisper-1"},
                 "temperature": 0.8,
-                "max_response_output_tokens": "inf",
                 "turn_detection": {
                     "type": "server_vad",
                     "threshold": 0.5,
