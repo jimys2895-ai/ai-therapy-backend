@@ -29,7 +29,7 @@ router = APIRouter()
 
 # Configuration
 REALTIME_MODEL_URI = getattr(settings, "OPENAI_REALTIME_URI",
-                             "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview")
+                             "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview")
 
 # OpenAI client
 openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if hasattr(settings, 'OPENAI_API_KEY') else None
@@ -469,8 +469,14 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": {"model": "whisper-1"},
                 "temperature": 0.8,
-                "max_response_output_tokens": 1000,
-                "turn_detection": {"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 500}
+                "max_response_output_tokens": "inf",
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                    "create_response": True
+                }
             }
         }
 
