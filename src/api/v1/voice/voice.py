@@ -445,8 +445,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
 
         # Connect to OpenAI Realtime API
         headers = {
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-            "OpenAI-Beta": "realtime=v1"
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
         }
 
         openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers)
