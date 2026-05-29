@@ -448,7 +448,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
         }
 
-        openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers)
+        openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers, subprotocols=["realtime"])
         # Abort if replaced during connect
         if manager.session_generations.get(session_id) != generation:
             logger.info(f"🛑 Discarding newly opened OpenAI WS (stale generation) session={session_id}")
