@@ -1,5 +1,6 @@
 import json
 import asyncio
+import websockets
 import time
 import hashlib
 import base64
@@ -28,7 +29,7 @@ router = APIRouter()
 
 # Configuration
 REALTIME_MODEL_URI = getattr(settings, "OPENAI_REALTIME_URI",
-                             "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17")
+                             "wss://api.openai.com/v1/realtime?model=gpt-realtime-2")
 
 # OpenAI client
 openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if hasattr(settings, 'OPENAI_API_KEY') else None
@@ -442,128 +443,133 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
 
         logger.info(f"🎤 Selected voice '{voice_type}' for {patient_name}")
 
-        # Connect via the OpenAI SDK — it handles auth and protocol version automatically
-        model_name = REALTIME_MODEL_URI.split("model=")[-1].split("&")[0] if "model=" in REALTIME_MODEL_URI else "gpt-4o-realtime-preview-2024-12-17"
+        # Connect to OpenAI Realtime GA API — no OpenAI-Beta header, GA model name
+        headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
+        }
 
-        async with openai_client.beta.realtime.connect(model=model_name) as conn:
-            # Abort if replaced during connect
-            if manager.session_generations.get(session_id) != generation:
-                logger.info(f"🛑 Discarding newly opened OpenAI WS (stale generation) session={session_id}")
-                return
-            manager.openai_connections[session_id] = conn
-            logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
+        openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers)
+        # Abort if replaced during connect
+        if manager.session_generations.get(session_id) != generation:
+            logger.info(f"🛑 Discarding newly opened OpenAI WS (stale generation) session={session_id}")
+            await openai_ws.close()
+            return
+        manager.openai_connections[session_id] = openai_ws
+        logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-            # Configure session
-            system_prompt = create_patient_system_prompt(patient_data)
-            await conn.send({
-                "type": "session.update",
-                "session": {
-                    "modalities": ["text", "audio"],
-                    "instructions": system_prompt,
-                    "voice": voice_type,
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "input_audio_transcription": {"model": "whisper-1"},
-                    "temperature": 0.8,
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
-                        "create_response": True
-                    }
+        # Configure session
+        system_prompt = create_patient_system_prompt(patient_data)
+        session_config = {
+            "type": "session.update",
+            "session": {
+                "modalities": ["text", "audio"],
+                "instructions": system_prompt,
+                "voice": voice_type,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": {"model": "whisper-1"},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                    "create_response": True
                 }
-            })
-            await asyncio.sleep(0.5)  # Allow session configuration
+            }
+        }
 
-            # Send connection established message with session ID
-            await manager.send_to_client(session_id, {
-                "type": "connection_established",
-                "message": f"Connected to {patient_name} simulation",
-                "patient_name": patient_name,
-                "session_id": session_id
-            })
+        await openai_ws.send(json.dumps(session_config))
+        await asyncio.sleep(0.5)  # Allow session configuration
 
-            # Handle OpenAI messages
-            async for event in conn:
-                # Abort if client websocket gone OR generation superseded
-                if session_id not in manager.active_connections:
-                    logger.info(f"🛑 Client websocket closed; stopping OpenAI stream for session {session_id} gen={generation}")
-                    break
-                if manager.session_generations.get(session_id) != generation:
-                    logger.info(f"🛑 Generation changed; stopping OpenAI stream for session {session_id} old_gen={generation}")
-                    break
-                try:
-                    event_type = event.type
-                    data = event.model_dump() if hasattr(event, 'model_dump') else {}
-                    # Normalize event types across possible API versions
-                    if event_type in ("session.updated",):
-                        logger.info(f"✅ Session configured for {patient_name}")
-                    elif event_type in ("input_audio_buffer.speech_started",):
-                        await manager.send_to_client(session_id, {"type": "speech_started"})
-                    elif event_type in ("input_audio_buffer.speech_stopped",):
-                        if session_id not in manager.pending_student_seq:
-                            manager.pending_student_seq[session_id] = manager.next_sequence(session_id)
-                        await manager.send_to_client(session_id, {"type": "speech_stopped"})
-                    elif event_type == "conversation.item.input_audio_transcription.completed":
-                        transcription = data.get("transcript", "").strip()
-                        if transcription:
-                            logger.info(f"🎤 Student transcription: '{transcription}' (length: {len(transcription)})")
-                            reserved = manager.pending_student_seq.pop(session_id, None)
-                            seq_to_use = reserved if reserved is not None else manager.next_sequence(session_id)
-                            await manager.send_to_client(session_id, {
-                                "type": "transcription_complete",
-                                "text": transcription,
-                                "speaker": "student",
-                                "seq": seq_to_use
-                            })
-                            asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, transcription))
-                        else:
-                            logger.warning(f"⚠️ Empty transcription received for session {session_id}")
-                    elif event_type in ("response.audio_transcript.delta", "response.output_text.delta"):
-                        text_delta = data.get("delta", "") or data.get("text", "")
-                        if text_delta:
-                            if session_id not in manager.response_accumulator:
-                                manager.response_accumulator[session_id] = ""
-                            manager.response_accumulator[session_id] += text_delta
-                            await manager.send_to_client(session_id, {
-                                "type": "response_text_delta",
-                                "delta": text_delta
-                            })
-                    elif event_type in ("response.audio.delta", "response.output_audio.delta"):
-                        if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
-                            break
-                        audio_data = data.get("delta") or data.get("audio")
-                        if audio_data:
-                            await manager.send_to_client(session_id, {
-                                "type": "audio_response",
-                                "audio": audio_data
-                            })
-                    elif event_type in ("response.done", "response.completed"):
-                        if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
-                            break
-                        await manager.send_to_client(session_id, {"type": "audio_response_complete"})
-                        manager.awaiting_response[session_id] = False
-                        accumulated_text = manager.response_accumulator.get(session_id, "")
-                        if accumulated_text:
-                            logger.info(f"🤖 Patient response: '{accumulated_text}' (length: {len(accumulated_text)})")
-                            await manager.send_to_client(session_id, {
-                                "type": "patient_text_response",
-                                "text": accumulated_text,
-                                "speaker": "patient",
-                                "seq": manager.next_sequence(session_id)
-                            })
-                            asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.PATIENT, accumulated_text))
-                            manager.response_accumulator[session_id] = ""
-                    elif event_type == "error":
-                        logger.error(f"OpenAI API error: {data}")
+        # Send connection established message with session ID
+        await manager.send_to_client(session_id, {
+            "type": "connection_established",
+            "message": f"Connected to {patient_name} simulation",
+            "patient_name": patient_name,
+            "session_id": session_id
+        })
+
+        # Handle OpenAI messages
+        async for message in openai_ws:
+            # Abort if client websocket gone OR generation superseded
+            if session_id not in manager.active_connections:
+                logger.info(f"🛑 Client websocket closed; stopping OpenAI stream for session {session_id} gen={generation}")
+                break
+            if manager.session_generations.get(session_id) != generation:
+                logger.info(f"🛑 Generation changed; stopping OpenAI stream for session {session_id} old_gen={generation}")
+                break
+            try:
+                data = json.loads(message)
+                event_type = data.get("type")
+                if event_type in ("session.updated",):
+                    logger.info(f"✅ Session configured for {patient_name}")
+                elif event_type in ("input_audio_buffer.speech_started",):
+                    await manager.send_to_client(session_id, {"type": "speech_started"})
+                elif event_type in ("input_audio_buffer.speech_stopped",):
+                    if session_id not in manager.pending_student_seq:
+                        manager.pending_student_seq[session_id] = manager.next_sequence(session_id)
+                    await manager.send_to_client(session_id, {"type": "speech_stopped"})
+                elif event_type == "conversation.item.input_audio_transcription.completed":
+                    transcription = data.get("transcript", "").strip()
+                    if transcription:
+                        logger.info(f"🎤 Student transcription: '{transcription}' (length: {len(transcription)})")
+                        reserved = manager.pending_student_seq.pop(session_id, None)
+                        seq_to_use = reserved if reserved is not None else manager.next_sequence(session_id)
                         await manager.send_to_client(session_id, {
-                            "type": "error",
-                            "error": data.get("error", {})
+                            "type": "transcription_complete",
+                            "text": transcription,
+                            "speaker": "student",
+                            "seq": seq_to_use
                         })
+                        asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, transcription))
+                    else:
+                        logger.warning(f"⚠️ Empty transcription received for session {session_id}")
+                elif event_type in ("response.audio_transcript.delta", "response.output_text.delta"):
+                    text_delta = data.get("delta", "") or data.get("text", "")
+                    if text_delta:
+                        if session_id not in manager.response_accumulator:
+                            manager.response_accumulator[session_id] = ""
+                        manager.response_accumulator[session_id] += text_delta
+                        await manager.send_to_client(session_id, {
+                            "type": "response_text_delta",
+                            "delta": text_delta
+                        })
+                elif event_type in ("response.audio.delta", "response.output_audio.delta"):
+                    if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
+                        break
+                    audio_data = data.get("delta") or data.get("audio")
+                    if audio_data:
+                        await manager.send_to_client(session_id, {
+                            "type": "audio_response",
+                            "audio": audio_data
+                        })
+                elif event_type in ("response.done", "response.completed"):
+                    if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
+                        break
+                    await manager.send_to_client(session_id, {"type": "audio_response_complete"})
+                    manager.awaiting_response[session_id] = False
+                    accumulated_text = manager.response_accumulator.get(session_id, "")
+                    if accumulated_text:
+                        logger.info(f"🤖 Patient response: '{accumulated_text}' (length: {len(accumulated_text)})")
+                        await manager.send_to_client(session_id, {
+                            "type": "patient_text_response",
+                            "text": accumulated_text,
+                            "speaker": "patient",
+                            "seq": manager.next_sequence(session_id)
+                        })
+                        asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.PATIENT, accumulated_text))
+                        manager.response_accumulator[session_id] = ""
+                elif event_type == "error":
+                    logger.error(f"OpenAI API error: {data}")
+                    await manager.send_to_client(session_id, {
+                        "type": "error",
+                        "error": data.get("error", {})
+                    })
 
-                except Exception as e:
-                    logger.error(f"Error handling OpenAI message: {e}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode OpenAI message: {e}")
+            except Exception as e:
+                logger.error(f"Error handling OpenAI message: {e}")
 
     except Exception as e:
         logger.error(f"OpenAI connection error for session {session_id}: {e}")
@@ -690,10 +696,10 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                     audio_bytes = message["bytes"]
                     if session_id in manager.openai_connections:
                         b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-                        await manager.openai_connections[session_id].send({
+                        await manager.openai_connections[session_id].send(json.dumps({
                             "type": "input_audio_buffer.append",
                             "audio": b64_audio
-                        })
+                        }))
 
                 # Handle text commands
                 elif message.get("text") is not None:
@@ -705,21 +711,21 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                             # Handle base64 audio data
                             audio_data = data.get("audio", "")
                             if session_id in manager.openai_connections:
-                                await manager.openai_connections[session_id].send({
+                                await manager.openai_connections[session_id].send(json.dumps({
                                     "type": "input_audio_buffer.append",
                                     "audio": audio_data
-                                })
+                                }))
 
                         elif message_type == "audio_commit":
                             # Commit audio buffer and request response
                             if session_id in manager.openai_connections and not manager.awaiting_response.get(session_id, False):
                                 manager.awaiting_response[session_id] = True
-                                await manager.openai_connections[session_id].send({
+                                await manager.openai_connections[session_id].send(json.dumps({
                                     "type": "input_audio_buffer.commit"
-                                })
-                                await manager.openai_connections[session_id].send({
+                                }))
+                                await manager.openai_connections[session_id].send(json.dumps({
                                     "type": "response.create"
-                                })
+                                }))
 
                         elif message_type == "text_message":
                             # Handle direct text input
@@ -732,17 +738,17 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                                 # Add student message to session first
                                 await manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, text_input)
                                 # Send to OpenAI
-                                await manager.openai_connections[session_id].send({
+                                await manager.openai_connections[session_id].send(json.dumps({
                                     "type": "conversation.item.create",
                                     "item": {
                                         "type": "message",
                                         "role": "user",
                                         "content": [{"type": "input_text", "text": text_input}]
                                     }
-                                })
-                                await manager.openai_connections[session_id].send({
+                                }))
+                                await manager.openai_connections[session_id].send(json.dumps({
                                     "type": "response.create"
-                                })
+                                }))
                                 # Send confirmation to client WITH seq (treat like transcription_complete) NEW
                                 await manager.send_to_client(session_id, {
                                     "type": "text_message_sent",
