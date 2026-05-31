@@ -460,30 +460,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             return
         manager.openai_connections[session_id] = openai_ws
         logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
-
-        # Minimal session config to isolate the issue
-        logger.info(f"📤 Sending session.update for {patient_name}...")
-        session_config = {
-            "type": "session.update",
-            "session": {
-                "type": "realtime",
-                "model": "gpt-realtime-2",
-                "instructions": system_prompt,
-                "output_modalities": ["audio"],
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": 24000},
-                        "turn_detection": {"type": "semantic_vad"}
-                    },
-                    "output": {
-                        "format": {"type": "audio/pcm"},
-                        "voice": voice_type
-                    }
-                }
-            }
-        }
-        await openai_ws.send(json.dumps(session_config))
-        logger.info(f"✅ Session config sent for {patient_name}")
+        logger.info(f"DIAGNOSTIC: NOT sending session.update — waiting for server's first message")
 
         await manager.send_to_client(session_id, {
             "type": "connection_established",
@@ -503,6 +480,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             try:
                 data = json.loads(message)
                 event_type = data.get("type")
+                logger.info(f"DIAGNOSTIC: Server sent event_type='{event_type}' data={json.dumps(data)[:300]}")
 
                 if event_type == "session.updated":
                     logger.info(f"✅ Session configured for {patient_name}")
