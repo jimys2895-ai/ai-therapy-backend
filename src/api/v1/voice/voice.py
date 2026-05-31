@@ -443,8 +443,8 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         logger.info(f"🎤 Selected voice '{voice_type}' for {patient_name}")
         system_prompt = create_patient_system_prompt(patient_data)
 
-        async with openai_client.realtime.connect(
-            model="gpt-realtime-2"
+        async with openai_client.beta.realtime.connect(
+            model="gpt-realtime"
         ) as connection:
             if manager.session_generations.get(session_id) != generation:
                 logger.info(f"🛑 Discarding SDK connection (stale generation) session={session_id}")
