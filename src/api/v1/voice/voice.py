@@ -29,7 +29,7 @@ router = APIRouter()
 
 # Configuration
 REALTIME_MODEL_URI = getattr(settings, "OPENAI_REALTIME_URI",
-                             "wss://api.openai.com/v1/realtime?model=gpt-realtime-2")
+                             "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17")
 
 # OpenAI client
 openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if hasattr(settings, 'OPENAI_API_KEY') else None
@@ -448,7 +448,11 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
         }
 
-        openai_ws = await websockets.connect(REALTIME_MODEL_URI, additional_headers=headers)
+        openai_ws = await websockets.connect(
+            REALTIME_MODEL_URI,
+            additional_headers=headers,
+            subprotocols=["openai-insecure-json-v1"]
+        )
         # Abort if replaced during connect
         if manager.session_generations.get(session_id) != generation:
             logger.info(f"🛑 Discarding newly opened OpenAI WS (stale generation) session={session_id}")
