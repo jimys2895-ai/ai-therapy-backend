@@ -436,9 +436,9 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             return
 
         patient_name = patient_data.get('name', 'Unknown')
-        voice_type = PATIENT_VOICE_MAP.get(patient_name, 'alloy')
+        voice_type = PATIENT_VOICE_MAP.get(patient_name, 'marin')  # 'marin' is gpt-realtime-2 default
 
-        if voice_type == 'alloy' and patient_name:
+        if voice_type == 'marin' and patient_name:
             for mapped_name, mapped_voice in PATIENT_VOICE_MAP.items():
                 if mapped_name.lower() == patient_name.lower().strip():
                     voice_type = mapped_voice
@@ -447,7 +447,6 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         logger.info(f"🎤 Selected voice '{voice_type}' for {patient_name}")
         system_prompt = create_patient_system_prompt(patient_data)
 
-        # Raw websocket — no OpenAI-Beta header, which causes beta_api_shape_disabled
         headers = {
             "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
         }
@@ -462,13 +461,15 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         manager.openai_connections[session_id] = openai_ws
         logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-        # GA Realtime API session format (audio format is a nested object, not a string)
+        # Minimal session config to isolate the issue
+        logger.info(f"📤 Sending session.update for {patient_name}...")
         session_config = {
             "type": "session.update",
             "session": {
                 "type": "realtime",
-                "output_modalities": ["audio"],
+                "model": "gpt-realtime-2",
                 "instructions": system_prompt,
+                "output_modalities": ["audio"],
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
