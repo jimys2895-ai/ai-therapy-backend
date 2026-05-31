@@ -454,11 +454,10 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             manager.openai_connections[session_id] = connection
             logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-            # Test with exact format from official docs (text only first to confirm connection works)
+            # Bare minimum — audio modality only, no instructions
             await connection.session.update(session={
                 "type": "realtime",
-                "output_modalities": ["text"],
-                "instructions": system_prompt
+                "output_modalities": ["audio"]
             })
             logger.info(f"✅ Session config sent for {patient_name}")
 
