@@ -483,8 +483,12 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                 }
             }
         }
-        await openai_ws.send_str(json.dumps(session_config))
-        logger.info(f"✅ Session config sent for {patient_name}")
+        try:
+            await openai_ws.send_str(json.dumps(session_config))
+            logger.info(f"✅ Session config sent for {patient_name}")
+        except Exception as send_err:
+            logger.error(f"SEND FAILED: type={type(send_err).__name__} module={type(send_err).__module__} msg={send_err}")
+            raise
 
         await manager.send_to_client(session_id, {
             "type": "connection_established",
@@ -591,7 +595,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         logger.info(f"OpenAI task cancelled for session {session_id}")
         raise
     except Exception as e:
-        logger.error(f"OpenAI connection error for session {session_id}: {e}")
+        logger.error(f"OpenAI connection error for session {session_id}: type={type(e).__name__} module={type(e).__module__} msg={e}")
         await manager.send_to_client(session_id, {
             "type": "error",
             "error": {"message": f"OpenAI connection failed: {str(e)}"}
