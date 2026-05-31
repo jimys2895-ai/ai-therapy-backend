@@ -28,6 +28,7 @@ router = APIRouter()
 
 # OpenAI client
 openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if hasattr(settings, 'OPENAI_API_KEY') else None
+logger.info(f"OpenAI SDK version: {openai.__version__}")
 
 # Voice mapping for patients
 PATIENT_VOICE_MAP = {
@@ -453,21 +454,18 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             manager.openai_connections[session_id] = connection
             logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-            # GA Realtime API format: audio config nested under session.audio
+            # GA Realtime API: audio format is a nested object, not a string
             await connection.session.update(session={
                 "type": "realtime",
+                "output_modalities": ["audio"],
                 "instructions": system_prompt,
                 "audio": {
                     "input": {
-                        "format": "audio/pcm",
-                        "transcription": {"model": "gpt-4o-mini-transcribe"},
-                        "turn_detection": {
-                            "type": "semantic_vad",
-                            "interrupt_response": True
-                        }
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "turn_detection": {"type": "semantic_vad"}
                     },
                     "output": {
-                        "format": "audio/pcm",
+                        "format": {"type": "audio/pcm"},
                         "voice": voice_type
                     }
                 }
