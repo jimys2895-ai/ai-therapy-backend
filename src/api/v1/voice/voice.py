@@ -443,8 +443,8 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         logger.info(f"🎤 Selected voice '{voice_type}' for {patient_name}")
         system_prompt = create_patient_system_prompt(patient_data)
 
-        async with openai_client.beta.realtime.connect(
-            model="gpt-realtime"
+        async with openai_client.realtime.connect(
+            model="gpt-realtime-2"
         ) as connection:
             if manager.session_generations.get(session_id) != generation:
                 logger.info(f"🛑 Discarding SDK connection (stale generation) session={session_id}")
@@ -453,19 +453,23 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             manager.openai_connections[session_id] = connection
             logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
+            # GA Realtime API format: audio config nested under session.audio
             await connection.session.update(session={
-                "modalities": ["text", "audio"],
+                "type": "realtime",
                 "instructions": system_prompt,
-                "voice": voice_type,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
-                    "create_response": True
+                "audio": {
+                    "input": {
+                        "format": "audio/pcm",
+                        "transcription": {"model": "gpt-4o-mini-transcribe"},
+                        "turn_detection": {
+                            "type": "semantic_vad",
+                            "interrupt_response": True
+                        }
+                    },
+                    "output": {
+                        "format": "audio/pcm",
+                        "voice": voice_type
+                    }
                 }
             })
 
@@ -510,7 +514,9 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                             asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, transcription))
                         else:
                             logger.warning(f"⚠️ Empty transcription for session {session_id}")
-                    elif event_type in ("response.audio_transcript.delta", "response.output_text.delta"):
+                    # GA renamed: response.audio_transcript.delta → response.output_audio_transcript.delta
+                    elif event_type in ("response.output_audio_transcript.delta", "response.output_text.delta",
+                                        "response.audio_transcript.delta"):
                         text_delta = getattr(event, 'delta', '') or ''
                         if text_delta:
                             if session_id not in manager.response_accumulator:
@@ -520,7 +526,8 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                                 "type": "response_text_delta",
                                 "delta": text_delta
                             })
-                    elif event_type in ("response.audio.delta", "response.output_audio.delta"):
+                    # GA renamed: response.audio.delta → response.output_audio.delta
+                    elif event_type in ("response.output_audio.delta", "response.audio.delta"):
                         if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
                             break
                         audio_data = getattr(event, 'delta', None) or getattr(event, 'audio', None)
@@ -529,7 +536,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                                 "type": "audio_response",
                                 "audio": audio_data
                             })
-                    elif event_type in ("response.done", "response.completed"):
+                    elif event_type == "response.done":
                         if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
                             break
                         await manager.send_to_client(session_id, {"type": "audio_response_complete"})
