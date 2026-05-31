@@ -1,6 +1,6 @@
 import json
 import asyncio
-import websockets
+import aiohttp
 import time
 import hashlib
 import base64
@@ -102,8 +102,8 @@ class VoiceSessionManager:
         if ws := self.openai_connections.pop(session_id, None):
             try:
                 await ws.close()
-            except Exception as e:
-                logger.error(f"Error closing OpenAI connection: {e}")
+            except Exception:
+                pass
 
     async def find_session_in_db(self, session_id: str):
         """Find session in database trying different ID formats"""
@@ -450,17 +450,41 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
         headers = {
             "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
         }
-        openai_ws = await websockets.connect(
+        aiohttp_session = aiohttp.ClientSession()
+        openai_ws = await aiohttp_session.ws_connect(
             "wss://api.openai.com/v1/realtime?model=gpt-realtime-2",
-            additional_headers=headers
+            headers=headers
         )
         if manager.session_generations.get(session_id) != generation:
             logger.info(f"🛑 Discarding newly opened OpenAI WS (stale generation) session={session_id}")
             await openai_ws.close()
+            await aiohttp_session.close()
             return
         manager.openai_connections[session_id] = openai_ws
         logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
-        logger.info(f"DIAGNOSTIC: NOT sending session.update — waiting for server's first message")
+
+        # Send GA format session.update
+        session_config = {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "model": "gpt-realtime-2",
+                "instructions": system_prompt,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "turn_detection": {"type": "semantic_vad"}
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm"},
+                        "voice": voice_type
+                    }
+                }
+            }
+        }
+        await openai_ws.send_str(json.dumps(session_config))
+        logger.info(f"✅ Session config sent for {patient_name}")
 
         await manager.send_to_client(session_id, {
             "type": "connection_established",
@@ -469,7 +493,7 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             "session_id": session_id
         })
 
-        async for message in openai_ws:
+        async for msg in openai_ws:
             if session_id not in manager.active_connections:
                 logger.info(f"🛑 Client gone; stopping OpenAI stream session={session_id}")
                 break
@@ -477,10 +501,22 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                 logger.info(f"🛑 Generation changed; stopping session={session_id}")
                 break
 
+            if msg.type == aiohttp.WSMsgType.CLOSE:
+                logger.error(f"OpenAI closed WS: code={msg.data} reason={msg.extra}")
+                await manager.send_to_client(session_id, {
+                    "type": "error",
+                    "error": {"message": f"OpenAI closed: {msg.extra}"}
+                })
+                break
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                logger.error(f"OpenAI WS error: {openai_ws.exception()}")
+                break
+            elif msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+
             try:
-                data = json.loads(message)
+                data = json.loads(msg.data)
                 event_type = data.get("type")
-                logger.info(f"DIAGNOSTIC: Server sent event_type='{event_type}' data={json.dumps(data)[:300]}")
 
                 if event_type == "session.updated":
                     logger.info(f"✅ Session configured for {patient_name}")
@@ -563,6 +599,10 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
     finally:
         if session_id in manager.openai_connections and manager.session_generations.get(session_id) == generation:
             await manager._close_openai_connection(session_id)
+        try:
+            await aiohttp_session.close()
+        except Exception:
+            pass
 
 @router.websocket("/realtime/{patient_id}")
 async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str = Query(...)):
@@ -679,7 +719,7 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                     audio_bytes = message["bytes"]
                     if session_id in manager.openai_connections:
                         b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-                        await manager.openai_connections[session_id].send(json.dumps({
+                        await manager.openai_connections[session_id].send_str(json.dumps({
                             "type": "input_audio_buffer.append",
                             "audio": b64_audio
                         }))
@@ -693,7 +733,7 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                         if message_type == "audio_data":
                             audio_data = data.get("audio", "")
                             if session_id in manager.openai_connections:
-                                await manager.openai_connections[session_id].send(json.dumps({
+                                await manager.openai_connections[session_id].send_str(json.dumps({
                                     "type": "input_audio_buffer.append",
                                     "audio": audio_data
                                 }))
@@ -701,10 +741,10 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                         elif message_type == "audio_commit":
                             if session_id in manager.openai_connections and not manager.awaiting_response.get(session_id, False):
                                 manager.awaiting_response[session_id] = True
-                                await manager.openai_connections[session_id].send(json.dumps({
+                                await manager.openai_connections[session_id].send_str(json.dumps({
                                     "type": "input_audio_buffer.commit"
                                 }))
-                                await manager.openai_connections[session_id].send(json.dumps({
+                                await manager.openai_connections[session_id].send_str(json.dumps({
                                     "type": "response.create"
                                 }))
 
@@ -715,7 +755,7 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                                 manager.awaiting_response[session_id] = True
                                 seq_for_text = manager.next_sequence(session_id)
                                 await manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, text_input)
-                                await manager.openai_connections[session_id].send(json.dumps({
+                                await manager.openai_connections[session_id].send_str(json.dumps({
                                     "type": "conversation.item.create",
                                     "item": {
                                         "type": "message",
@@ -723,7 +763,7 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                                         "content": [{"type": "input_text", "text": text_input}]
                                     }
                                 }))
-                                await manager.openai_connections[session_id].send(json.dumps({
+                                await manager.openai_connections[session_id].send_str(json.dumps({
                                     "type": "response.create"
                                 }))
                                 await manager.send_to_client(session_id, {
