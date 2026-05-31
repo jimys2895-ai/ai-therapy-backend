@@ -454,15 +454,19 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             manager.openai_connections[session_id] = connection
             logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-            # GA session config
-            await connection.session.update(session={
-                "type": "realtime",
-                "output_modalities": ["audio"],
-                "instructions": system_prompt,
-                "voice": voice_type,
-                "turn_detection": {"type": "semantic_vad"}
+            # Send raw session.update bypassing SDK TypedDict filtering
+            # (SDK 1.99.1 may strip unknown fields like "type": "realtime")
+            await connection.send({
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "output_modalities": ["audio"],
+                    "instructions": system_prompt,
+                    "voice": voice_type,
+                    "turn_detection": {"type": "semantic_vad"}
+                }
             })
-            logger.info(f"✅ Session config sent for {patient_name}")
+            logger.info(f"✅ Raw session.update sent for {patient_name}")
 
             await manager.send_to_client(session_id, {
                 "type": "connection_established",
