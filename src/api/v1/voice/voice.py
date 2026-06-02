@@ -19,8 +19,6 @@ from ....models.users import User
 from ....models.history import SessionStatus, TranscriptMessage, MessageSpeaker
 from ....models.recordings import Recording, RecordingCreate
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize router
@@ -723,7 +721,6 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: str, token: str =
                                     "speaker": "student",
                                     "seq": seq_for_text
                                 })
-                            else:
                             else:
                                 if not text_input:
                                     logger.warning(f"⚠️ Empty text message received for session {session_id}")
