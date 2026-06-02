@@ -4,12 +4,12 @@ A FastAPI backend with MongoDB for JWT authentication, subscription management, 
 
 ## Features
 
-- 🔐 JWT Authentication (signup, login, refresh tokens)
-- 👤 User Management with MongoDB
-- �️ Role-based Access Control (Customer, Moderator, Admin, Super Admin)
-- �💳 Subscription Plans (Free, Pro Monthly, Pro Yearly)
-- 🎯 Credit-based System (free plan has daily limits, paid plans unlimited)
-- 📊 MongoDB with Motor (async driver)
+- JWT Authentication (signup, login, refresh tokens)
+- User Management with MongoDB
+- Role-based Access Control (Customer, Moderator, Admin, Super Admin)
+- Subscription Plans (Free, Pro Monthly, Pro Yearly)
+- Credit-based System (free plan has daily limits, paid plans unlimited)
+- MongoDB with Motor (async driver)
 
 ## User Types & Permissions
 
