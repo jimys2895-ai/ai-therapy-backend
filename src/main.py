@@ -1,3 +1,5 @@
+import logging
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -16,9 +18,26 @@ from .api.v1.voice.insights import router as insights_router
 from .config import settings
 from .database import connect_to_mongo, close_mongo_connection
 
+logger = logging.getLogger(__name__)
+
+# Bump this marker whenever you want an unambiguous "is the new build live?" signal.
+BUILD_MARKER = "realtime-ga-session-shape"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    commit = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT")
+        or "unknown"
+    )
+    logger.info(
+        "🚀 BUILD CHECK | marker=%s | commit=%s | version=%s",
+        BUILD_MARKER,
+        commit[:12],
+        getattr(settings, "VERSION", "unknown"),
+    )
     await connect_to_mongo()
     yield
     # Shutdown
