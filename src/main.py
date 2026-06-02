@@ -1,16 +1,6 @@
-import logging
-import sys
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-
-# Configure logging to stdout so Railway does not mark INFO logs as errors
-logging.basicConfig(
-    level=logging.INFO,
-    stream=sys.stdout,
-    format="%(levelname)s:%(name)s:%(message)s",
-)
 
 from .api.v1.auth.auth import router as auth_router
 from .api.v1.users.users import router as users_router

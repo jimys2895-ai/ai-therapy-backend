@@ -19,6 +19,8 @@ from ....models.users import User
 from ....models.history import SessionStatus, TranscriptMessage, MessageSpeaker
 from ....models.recordings import Recording, RecordingCreate
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize router
@@ -452,16 +454,25 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
             manager.openai_connections[session_id] = connection
             logger.info(f"OpenAI WebSocket connected for session {session_id} gen={generation}")
 
-            # Send raw session.update bypassing SDK TypedDict filtering
-            # (SDK 1.99.1 may strip unknown fields like "type": "realtime")
+            # GA Realtime API session shape: voice/turn_detection/transcription
+            # must be nested under "audio". Using the old beta shape (top-level
+            # "voice"/"turn_detection") makes OpenAI close the socket with
+            # 4000 invalid_request_error.beta_api_shape_disabled.
             await connection.send({
                 "type": "session.update",
                 "session": {
                     "type": "realtime",
                     "output_modalities": ["audio"],
                     "instructions": system_prompt,
-                    "voice": voice_type,
-                    "turn_detection": {"type": "semantic_vad"}
+                    "audio": {
+                        "input": {
+                            "turn_detection": {"type": "semantic_vad"},
+                            "transcription": {"model": "gpt-4o-mini-transcribe"}
+                        },
+                        "output": {
+                            "voice": voice_type
+                        }
+                    }
                 }
             })
             logger.info(f"✅ Raw session.update sent for {patient_name}")
@@ -484,69 +495,69 @@ async def handle_openai_realtime(session_id: str, patient_data: Dict, generation
                 try:
                     event_type = event.type
 
-                if event_type == "session.updated":
-                    logger.info(f"✅ Session configured for {patient_name}")
-                elif event_type == "input_audio_buffer.speech_started":
-                    await manager.send_to_client(session_id, {"type": "speech_started"})
-                elif event_type == "input_audio_buffer.speech_stopped":
-                    if session_id not in manager.pending_student_seq:
-                        manager.pending_student_seq[session_id] = manager.next_sequence(session_id)
-                    await manager.send_to_client(session_id, {"type": "speech_stopped"})
-                elif event_type == "conversation.item.input_audio_transcription.completed":
-                    transcription = getattr(event, 'transcript', '').strip()
-                    if transcription:
-                        logger.info(f"🎤 Student: '{transcription}'")
-                        reserved = manager.pending_student_seq.pop(session_id, None)
-                        seq_to_use = reserved if reserved is not None else manager.next_sequence(session_id)
-                        await manager.send_to_client(session_id, {
-                            "type": "transcription_complete",
-                            "text": transcription,
-                            "speaker": "student",
-                            "seq": seq_to_use
-                        })
-                        asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, transcription))
-                elif event_type in ("response.output_audio_transcript.delta", "response.output_text.delta",
-                                    "response.audio_transcript.delta"):
-                    text_delta = getattr(event, 'delta', '') or ''
-                    if text_delta:
-                        if session_id not in manager.response_accumulator:
+                    if event_type == "session.updated":
+                        logger.info(f"✅ Session configured for {patient_name}")
+                    elif event_type == "input_audio_buffer.speech_started":
+                        await manager.send_to_client(session_id, {"type": "speech_started"})
+                    elif event_type == "input_audio_buffer.speech_stopped":
+                        if session_id not in manager.pending_student_seq:
+                            manager.pending_student_seq[session_id] = manager.next_sequence(session_id)
+                        await manager.send_to_client(session_id, {"type": "speech_stopped"})
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        transcription = getattr(event, 'transcript', '').strip()
+                        if transcription:
+                            logger.info(f"🎤 Student: '{transcription}'")
+                            reserved = manager.pending_student_seq.pop(session_id, None)
+                            seq_to_use = reserved if reserved is not None else manager.next_sequence(session_id)
+                            await manager.send_to_client(session_id, {
+                                "type": "transcription_complete",
+                                "text": transcription,
+                                "speaker": "student",
+                                "seq": seq_to_use
+                            })
+                            asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.STUDENT, transcription))
+                    elif event_type in ("response.output_audio_transcript.delta", "response.output_text.delta",
+                                        "response.audio_transcript.delta"):
+                        text_delta = getattr(event, 'delta', '') or ''
+                        if text_delta:
+                            if session_id not in manager.response_accumulator:
+                                manager.response_accumulator[session_id] = ""
+                            manager.response_accumulator[session_id] += text_delta
+                            await manager.send_to_client(session_id, {
+                                "type": "response_text_delta",
+                                "delta": text_delta
+                            })
+                    elif event_type in ("response.output_audio.delta", "response.audio.delta"):
+                        if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
+                            break
+                        audio_data = getattr(event, 'delta', None) or getattr(event, 'audio', None)
+                        if audio_data:
+                            await manager.send_to_client(session_id, {
+                                "type": "audio_response",
+                                "audio": audio_data
+                            })
+                    elif event_type == "response.done":
+                        if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
+                            break
+                        await manager.send_to_client(session_id, {"type": "audio_response_complete"})
+                        manager.awaiting_response[session_id] = False
+                        accumulated_text = manager.response_accumulator.get(session_id, "")
+                        if accumulated_text:
+                            logger.info(f"🤖 Patient: '{accumulated_text[:80]}'")
+                            await manager.send_to_client(session_id, {
+                                "type": "patient_text_response",
+                                "text": accumulated_text,
+                                "speaker": "patient",
+                                "seq": manager.next_sequence(session_id)
+                            })
+                            asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.PATIENT, accumulated_text))
                             manager.response_accumulator[session_id] = ""
-                        manager.response_accumulator[session_id] += text_delta
-                        await manager.send_to_client(session_id, {
-                            "type": "response_text_delta",
-                            "delta": text_delta
-                        })
-                elif event_type in ("response.output_audio.delta", "response.audio.delta"):
-                    if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
-                        break
-                    audio_data = getattr(event, 'delta', None) or getattr(event, 'audio', None)
-                    if audio_data:
-                        await manager.send_to_client(session_id, {
-                            "type": "audio_response",
-                            "audio": audio_data
-                        })
-                elif event_type == "response.done":
-                    if session_id not in manager.active_connections or manager.session_generations.get(session_id) != generation:
-                        break
-                    await manager.send_to_client(session_id, {"type": "audio_response_complete"})
-                    manager.awaiting_response[session_id] = False
-                    accumulated_text = manager.response_accumulator.get(session_id, "")
-                    if accumulated_text:
-                        logger.info(f"🤖 Patient: '{accumulated_text[:80]}'")
-                        await manager.send_to_client(session_id, {
-                            "type": "patient_text_response",
-                            "text": accumulated_text,
-                            "speaker": "patient",
-                            "seq": manager.next_sequence(session_id)
-                        })
-                        asyncio.create_task(manager.add_message_to_session(session_id, MessageSpeaker.PATIENT, accumulated_text))
-                        manager.response_accumulator[session_id] = ""
-                elif event_type == "error":
-                    logger.error(f"OpenAI API error: {event}")
-                    error_msg = {}
-                    if hasattr(event, 'error') and event.error:
-                        error_msg = {"message": str(event.error)}
-                    await manager.send_to_client(session_id, {"type": "error", "error": error_msg})
+                    elif event_type == "error":
+                        logger.error(f"OpenAI API error: {event}")
+                        error_msg = {}
+                        if hasattr(event, 'error') and event.error:
+                            error_msg = {"message": str(event.error)}
+                        await manager.send_to_client(session_id, {"type": "error", "error": error_msg})
 
                 except Exception as evt_err:
                     logger.error(f"Error handling event '{event_type}': {evt_err}")
