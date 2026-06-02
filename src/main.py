@@ -1,4 +1,3 @@
-import logging
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +17,6 @@ from .api.v1.voice.insights import router as insights_router
 from .config import settings
 from .database import connect_to_mongo, close_mongo_connection
 
-logger = logging.getLogger(__name__)
-
 # Bump this marker whenever you want an unambiguous "is the new build live?" signal.
 BUILD_MARKER = "realtime-ga-session-shape"
 
@@ -32,11 +29,12 @@ async def lifespan(app: FastAPI):
         or os.getenv("GIT_COMMIT")
         or "unknown"
     )
-    logger.info(
-        "🚀 BUILD CHECK | marker=%s | commit=%s | version=%s",
-        BUILD_MARKER,
-        commit[:12],
-        getattr(settings, "VERSION", "unknown"),
+    # Use print() so this is always visible in Railway logs, independent of
+    # whatever logging handlers/levels uvicorn has configured.
+    print(
+        f"🚀 BUILD CHECK | marker={BUILD_MARKER} | commit={commit[:12]} | "
+        f"version={getattr(settings, 'VERSION', 'unknown')}",
+        flush=True,
     )
     await connect_to_mongo()
     yield
